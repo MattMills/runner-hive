@@ -187,6 +187,7 @@ impl Config {
             let base = path.parent().unwrap_or(Path::new("."));
             cfg.data_dir = base.join(&cfg.data_dir);
         }
+        cfg.data_dir = std::path::absolute(&cfg.data_dir)?;
         if let Some(p) = cfg.worker.path.as_mut()
             && p.is_relative()
         {

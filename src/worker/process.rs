@@ -67,8 +67,11 @@ const TAIL_LINES: usize = 60;
 
 impl WorkerProcess {
     pub fn spawn(opts: SpawnOptions<'_>) -> Result<Self> {
-        let bin_dir = opts.exe.parent().context("worker exe has no parent dir")?;
-        let mut cmd = Command::new(opts.exe);
+        // Absolute: on Unix a relative program path is resolved after the
+        // child changes into `current_dir`.
+        let exe = std::path::absolute(opts.exe)?;
+        let bin_dir = exe.parent().context("worker exe has no parent dir")?;
+        let mut cmd = Command::new(&exe);
         cmd.current_dir(bin_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
