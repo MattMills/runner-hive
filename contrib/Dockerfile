@@ -17,6 +17,14 @@ RUN cargo build --release --locked --target x86_64-unknown-linux-musl
 
 FROM ${BASE}
 USER root
+# A job that can become root can read the daemon's admin token and every
+# registration key, which defeats worker.run_as. The official runner image
+# gives `runner` passwordless sudo through the sudo group; drop it unless
+# KEEP_SUDO=1 (only for jobs you trust with that).
+ARG KEEP_SUDO=0
+RUN if [ "$KEEP_SUDO" != 1 ] && id -nG runner 2>/dev/null | grep -qw sudo; then \
+        gpasswd -d runner sudo >/dev/null; \
+    fi
 COPY --from=build /src/target/x86_64-unknown-linux-musl/release/runner-hive /usr/local/bin/runner-hive
 ENTRYPOINT ["/usr/local/bin/runner-hive", "--config", "/etc/runner-hive/hive.toml"]
 CMD ["run"]
