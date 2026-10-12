@@ -179,8 +179,9 @@ its repo checked out when there is one, so incremental build caches stay warm.
 Early, but working end to end against github.com with the official runner
 2.338.0 as the worker.
 
-**Tested live** (Windows host, jobs from this repository's
-[`hive-e2e`](.github/workflows/hive-e2e.yml) workflow):
+**Tested live** (jobs from this repository's
+[`hive-e2e`](.github/workflows/hive-e2e.yml) workflow, on a Windows host and on
+a Linux host in Docker serving 150 repos with `run_as`):
 
 * registration through the legacy tenant flow, PS256 OAuth, server-enforced
   move to broker sessions;
@@ -192,7 +193,9 @@ Early, but working end to end against github.com with the official runner
   and the job ends `cancelled`;
 * restart after a hard kill: stale sessions are cleaned up;
 * 150 registrations in one process (numbers below);
-* discovery against a real 150-repo account (`sync --dry-run`).
+* discovery and registration for a real 150-repo account (300 registrations);
+* on Linux: jobs run as an unprivileged user without sudo, cannot read the
+  daemon's token, and get a per-slot `HOME` with shared toolchains.
 
 **Tested in CI**: unit tests, plus a self-test that starts the real
 `Runner.Worker` over inherited pipes on Linux x64/arm64 (including a static musl
@@ -202,7 +205,7 @@ build), macOS and Windows.
 (GitHub gave this account the legacy flow), the pipelines message queue with
 encrypted messages and `BrokerMigration` hand-off (GitHub put new registrations
 straight on the broker), worker-crash reporting, worker auto-update, pruning,
-and running jobs on a Linux host (Linux is covered only by the IPC self-test).
+and running jobs on macOS.
 
 **Not implemented**: the server-driven `RunnerRefreshConfig` migration (logged
 and ignored; the existing registration keeps working), legacy
