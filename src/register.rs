@@ -93,7 +93,42 @@ async fn remote_auth(
     .into())
 }
 
+/// Register, retrying transient failures (timeouts, 5xx, 429) like
+/// `config.sh` does. Retries are safe: an existing runner with the same name
+/// is replaced, not duplicated.
 pub async fn register(gh: &GitHub, req: RegisterRequest<'_>) -> Result<Identity> {
+    let mut attempt = 1;
+    loop {
+        match register_once(gh, &req).await {
+            Ok(id) => return Ok(id),
+            Err(e) if attempt < 3 && is_transient(&e) => {
+                tracing::debug!(
+                    "{}: registration attempt {attempt} failed: {e:#}",
+                    req.scope
+                );
+                attempt += 1;
+                tokio::time::sleep(crate::util::jitter(
+                    Duration::from_secs(2),
+                    Duration::from_secs(8),
+                ))
+                .await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+fn is_transient(err: &anyhow::Error) -> bool {
+    match crate::http::status_of(err) {
+        Some(s) => s == 429 || s >= 500,
+        // No HTTP status at all: connection or timeout error.
+        None => err
+            .chain()
+            .any(|e| e.downcast_ref::<reqwest::Error>().is_some()),
+    }
+}
+
+async fn register_once(gh: &GitHub, req: &RegisterRequest<'_>) -> Result<Identity> {
     let github_url = req.scope.github_url(&gh.web_url);
     let reg_token = gh.registration_token(req.scope).await?;
 
@@ -109,19 +144,20 @@ pub async fn register(gh: &GitHub, req: RegisterRequest<'_>) -> Result<Identity>
     .json()
     .await?;
 
-    let key = identity::generate_key()?;
-    let labels: Vec<String> = label_list(&req)
+    // 2048-bit keygen takes a while; keep it off the async worker threads.
+    let key = tokio::task::spawn_blocking(identity::generate_key).await??;
+    let labels: Vec<String> = label_list(req)
         .iter()
         .filter_map(|v| v["name"].as_str().map(String::from))
         .collect();
 
     let id = if auth.use_v2_flow {
-        register_runner_admin(gh, &req, &github_url, &reg_token, &auth, &key, labels).await?
+        register_runner_admin(gh, req, &github_url, &reg_token, &auth, &key, labels).await?
     } else {
         if !auth.token_schema.eq_ignore_ascii_case("OAuthAccessToken") {
             bail!("unsupported tenant token schema '{}'", auth.token_schema);
         }
-        register_legacy(gh, &req, &github_url, &auth, &key, labels).await?
+        register_legacy(gh, req, &github_url, &auth, &key, labels).await?
     };
     Ok(id)
 }

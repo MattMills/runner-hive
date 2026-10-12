@@ -1,0 +1,33 @@
+# systemd unit for runner-hive.
+#
+#   sudo useradd --system --create-home --home-dir /var/lib/runner-hive runner-hive
+#   sudo install -m 755 runner-hive /usr/local/bin/
+#   sudo install -d -o runner-hive /etc/runner-hive
+#   sudo -u runner-hive runner-hive --config /etc/runner-hive/hive.toml init
+#   (then set data_dir = "/var/lib/runner-hive" and your [[target]] in hive.toml)
+#   echo 'RUNNER_HIVE_TOKEN=ghp_...' | sudo tee /etc/runner-hive/env && sudo chmod 600 /etc/runner-hive/env
+#   sudo cp runner-hive.service /etc/systemd/system/ && sudo systemctl enable --now runner-hive
+#
+# The official worker needs .NET's native dependencies (libicu etc.). After the
+# first start, install them once with:
+#   sudo /var/lib/runner-hive/packages/<version>/bin/installdependencies.sh
+
+[Unit]
+Description=runner-hive: GitHub Actions jobs for many repositories
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=runner-hive
+WorkingDirectory=/var/lib/runner-hive
+EnvironmentFile=/etc/runner-hive/env
+ExecStart=/usr/local/bin/runner-hive --config /etc/runner-hive/hive.toml run
+# Let runner-hive cancel running jobs and close its sessions itself; only the
+# main process gets SIGTERM, stragglers are killed after the timeout.
+KillMode=mixed
+TimeoutStopSec=330
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

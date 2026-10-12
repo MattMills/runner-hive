@@ -60,8 +60,11 @@ pub async fn run(cfg: Config, initial_sync: bool) -> Result<()> {
 
     let mut tasks: JoinSet<(String, ListenerExit)> = JoinSet::new();
     let mut running: HashMap<String, Running> = HashMap::new();
-    for id in identities {
-        start(&shared, &mut tasks, &mut running, id);
+    // Stagger startup so hundreds of registrations do not all request OAuth
+    // tokens and sessions in the same instant.
+    for (i, id) in identities.into_iter().enumerate() {
+        let delay = Duration::from_millis(40 * i as u64);
+        start(&shared, &mut tasks, &mut running, id, delay);
     }
     tracing::info!(
         "runner-hive: {} registrations listening, up to {} jobs at once",
@@ -132,6 +135,7 @@ fn start(
     tasks: &mut JoinSet<(String, ListenerExit)>,
     running: &mut HashMap<String, Running>,
     id: Identity,
+    delay: Duration,
 ) {
     let key = id.display_key();
     if running.contains_key(&key) {
@@ -141,7 +145,10 @@ fn start(
     match Listener::new(shared.clone(), id, rx) {
         Ok(listener) => {
             let k = key.clone();
-            tasks.spawn(async move { (k, listener.run().await) });
+            tasks.spawn(async move {
+                tokio::time::sleep(delay).await;
+                (k, listener.run().await)
+            });
             running.insert(key, Running { stop: tx });
         }
         Err(e) => tracing::error!("{key}: cannot start: {e:#}"),
@@ -205,7 +212,7 @@ fn restart_missing(
         }
     }
     for id in ids {
-        start(shared, tasks, running, id);
+        start(shared, tasks, running, id, Duration::ZERO);
     }
 }
 

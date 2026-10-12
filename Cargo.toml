@@ -42,3 +42,9 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# RSA key generation is painfully slow unoptimized; keep debug builds usable.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+[profile.dev.package.rsa]
+opt-level = 3

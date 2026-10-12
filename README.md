@@ -158,18 +158,38 @@ of the runner package (near-zero disk) with that job's `.runner`. There are
 
 ## Status
 
-Working end to end against github.com, with the official runner 2.338.0 as the
-worker:
-registration (legacy and runner-admin flows), OAuth, broker and pipelines
-sessions, job acquisition, lock renewal, cancellation, worker-crash reporting,
-discovery/pruning, and worker download/update. CI runs the unit tests plus a
-self-test that starts the real `Runner.Worker` over inherited pipes on Linux
-(x64 and arm64), macOS and Windows.
+Early, but working end to end against github.com with the official runner
+2.338.0 as the worker.
 
-Not implemented yet: the server-driven `RunnerRefreshConfig` migration (logged
+**Tested live** (Windows host, jobs from this repository's
+[`hive-e2e`](.github/workflows/hive-e2e.yml) workflow):
+
+* registration through the legacy tenant flow, PS256 OAuth, server-enforced
+  move to broker sessions;
+* a 3-job matrix on 2 registrations (2 in parallel, then the third), with
+  `actions/checkout`, outputs, step summaries and log upload;
+* `max_jobs = 1`: strict one-at-a-time execution with requests held until a
+  slot frees, nothing lost or duplicated;
+* cancelling a running job: the step is cancelled, `if: cancelled()` steps run,
+  and the job ends `cancelled`;
+* restart after a hard kill: stale sessions are cleaned up;
+* 150 registrations in one process (numbers below);
+* discovery against a real 150-repo account (`sync --dry-run`).
+
+**Tested in CI**: unit tests, plus a self-test that starts the real
+`Runner.Worker` over inherited pipes on Linux x64/arm64 (including a static musl
+build), macOS and Windows.
+
+**Implemented but not yet exercised live**: the runner-admin registration flow
+(GitHub gave this account the legacy flow), the pipelines message queue with
+encrypted messages and `BrokerMigration` hand-off (GitHub put new registrations
+straight on the broker), worker-crash reporting, worker auto-update, pruning,
+and running jobs on a Linux host (Linux is covered only by the IPC self-test).
+
+**Not implemented**: the server-driven `RunnerRefreshConfig` migration (logged
 and ignored; the existing registration keeps working), legacy
-`PipelineAgentJobRequest` messages (old GHES), and running jobs as a different OS
-user.
+`PipelineAgentJobRequest` messages (old GHES), and running jobs as a different
+OS user.
 
 ## License
 

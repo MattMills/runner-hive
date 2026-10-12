@@ -31,3 +31,21 @@ jobs:
         run: |
           printf 'data_dir = "selftest-data"\n' > selftest.toml
           cargo run --quiet -- --config selftest.toml self-test
+
+  static-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --locked --target x86_64-unknown-linux-musl
+      - name: Static binary runs the worker self-test
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          file target/x86_64-unknown-linux-musl/release/runner-hive
+          printf 'data_dir = "selftest-data"\n' > selftest.toml
+          target/x86_64-unknown-linux-musl/release/runner-hive --config selftest.toml self-test
