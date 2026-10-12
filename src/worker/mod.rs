@@ -177,6 +177,9 @@ pub async fn run_job(
     tokio::pin!(renew);
     let mut renewing = true;
     let mut kill_at: Option<Instant> = None;
+    // The worker reads exactly one control message after the job, and the
+    // broker re-delivers cancellations, so only the first one is forwarded.
+    let mut stop_sent = false;
 
     let status = loop {
         let kill_timer = async {
@@ -190,21 +193,27 @@ pub async fn run_job(
             _ = &mut renew, if renewing => {
                 renewing = false;
                 tracing::warn!("job {}: lost the job lock, cancelling the worker", info.job_id);
-                let _ = worker.send(MessageType::CancelRequest, "").await;
+                if !std::mem::replace(&mut stop_sent, true) {
+                    let _ = worker.send(MessageType::CancelRequest, "").await;
+                }
                 kill_at.get_or_insert(Instant::now() + Duration::from_secs(300));
             }
             ctl = control.recv() => match ctl {
                 Some(JobControl::Cancel(timeout)) => {
-                    tracing::info!("job {}: cancellation requested", info.job_id);
-                    if worker.send(MessageType::CancelRequest, "").await.is_err() {
-                        worker.kill_tree().await;
+                    if !std::mem::replace(&mut stop_sent, true) {
+                        tracing::info!("job {}: cancellation requested", info.job_id);
+                        if worker.send(MessageType::CancelRequest, "").await.is_err() {
+                            worker.kill_tree().await;
+                        }
                     }
                     // Official runner: at least 60s, kill 15s before the deadline.
-                    let grace = timeout.max(Duration::from_secs(60)) - Duration::from_secs(15);
-                    kill_at = Some(kill_at.map_or(Instant::now() + grace, |k| k.min(Instant::now() + grace)));
+                    let deadline = Instant::now() + timeout.max(Duration::from_secs(60)) - Duration::from_secs(15);
+                    kill_at = Some(kill_at.map_or(deadline, |k| k.min(deadline)));
                 }
                 Some(JobControl::Shutdown) => {
-                    if worker.send(MessageType::RunnerShutdown, "").await.is_err() {
+                    if !std::mem::replace(&mut stop_sent, true)
+                        && worker.send(MessageType::RunnerShutdown, "").await.is_err()
+                    {
                         worker.kill_tree().await;
                     }
                     kill_at.get_or_insert(Instant::now() + Duration::from_secs(300));
