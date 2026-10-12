@@ -4,6 +4,7 @@
 //! pending HTTP long-poll.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -18,9 +19,9 @@ use crate::protocol::{
     self, AgentReference, BrokerMigration, CreateSession, EMPTY_GUID, JobCancelMessage,
     RunnerJobRequestRef, TaskAgentMessage, broker, message_types as mt, pipelines, run_service,
 };
-use crate::slots::Slots;
+use crate::slots::{Lease, Slots};
 use crate::worker::package::WorkerPackage;
-use crate::worker::{self, JobControl, JobOutcome, JobRun};
+use crate::worker::{self, JobControl, JobInfo, JobOutcome, JobRun};
 
 /// State shared by every listener in the hive.
 pub struct Shared {
@@ -115,6 +116,8 @@ fn classify(err: &anyhow::Error) -> Failure {
 }
 
 struct RunningJob {
+    request_id: String,
+    generation: u64,
     control: mpsc::Sender<JobControl>,
     handle: tokio::task::JoinHandle<()>,
 }
@@ -168,7 +171,7 @@ impl Listener {
         );
 
         let mut job: Option<RunningJob> = None;
-        let (done_tx, mut done_rx) = mpsc::channel::<()>(4);
+        let (done_tx, mut done_rx) = mpsc::channel::<u64>(4);
         let mut slots_rx = self.shared.slots.subscribe();
         let mut stop_rx = self.shutdown.clone();
         let mut failures = 0u32;
@@ -187,9 +190,11 @@ impl Listener {
                 loop {
                     tokio::select! {
                         r = &mut poll => break Some(r),
-                        _ = done_rx.recv() => {
-                            job = None;
-                            if self.status(false) != status { break None; }
+                        Some(finished) = done_rx.recv() => {
+                            if job.as_ref().is_some_and(|j| j.generation == finished) {
+                                job = None;
+                            }
+                            if self.status(job.is_some()) != status { break None; }
                         }
                         changed = slots_rx.changed(), if job.is_none() => {
                             if changed.is_err() { break None; }
@@ -260,7 +265,8 @@ impl Listener {
                 *migrated_broker = Some(url);
             }
             session.last_message_id = Some(p.message.message_id);
-            self.handle(&session, &p.message, &mut job, &done_tx).await;
+            self.handle(&session, &p.message, &mut job, &done_tx, &mut stop_rx)
+                .await;
             if p.from_pipelines {
                 self.delete_pipelines_message(&session, p.message.message_id)
                     .await;
@@ -584,7 +590,8 @@ impl Listener {
         session: &Session,
         msg: &TaskAgentMessage,
         job: &mut Option<RunningJob>,
-        done_tx: &mpsc::Sender<()>,
+        done_tx: &mpsc::Sender<u64>,
+        stop_rx: &mut watch::Receiver<bool>,
     ) {
         let body = msg.body.as_deref().unwrap_or("");
         let kind = msg.message_type.as_str();
@@ -596,6 +603,13 @@ impl Listener {
                     return;
                 }
             };
+            if job
+                .as_ref()
+                .is_some_and(|j| j.request_id == r.runner_request_id)
+            {
+                tracing::debug!("{}: duplicate delivery of the running job", self.tag);
+                return;
+            }
             if r.should_acknowledge
                 && let Some(url) = session.broker_url()
                 && let Err(e) = self
@@ -604,6 +618,36 @@ impl Listener {
             {
                 tracing::debug!("{}: acknowledge failed (best effort): {e:#}", self.tag);
             }
+
+            // Wait for a global slot and acquire the job *before* polling
+            // again: until a request is acquired the broker re-delivers it on
+            // every poll (the official listener also acquires inline).
+            let queued = Instant::now();
+            let lease = tokio::select! {
+                lease = self.shared.slots.acquire() => lease,
+                _ = stop_rx.changed() => return,
+            };
+            let waited = queued.elapsed();
+            let json = match self.acquire(&r).await {
+                Ok(j) => j,
+                Err(e) => {
+                    match run_service::job_gone(&e) {
+                        Some(why) => {
+                            tracing::info!("{}: job request skipped ({why:?})", self.tag)
+                        }
+                        None => tracing::error!("{}: cannot acquire job: {e:#}", self.tag),
+                    }
+                    return;
+                }
+            };
+            let info = match worker::parse_job(&json) {
+                Ok(i) => i,
+                Err(e) => {
+                    tracing::error!("{}: unusable job message: {e:#}", self.tag);
+                    return;
+                }
+            };
+
             if let Some(old) = job.take() {
                 // The service only does this if it considers the old job over.
                 tracing::warn!(
@@ -615,7 +659,14 @@ impl Listener {
                     .send(JobControl::Cancel(Duration::from_secs(60)))
                     .await;
             }
-            *job = Some(self.spawn_job(r, done_tx.clone()));
+            *job = Some(self.spawn_job(
+                r.runner_request_id,
+                lease,
+                waited,
+                json,
+                info,
+                done_tx.clone(),
+            ));
         } else if kind.eq_ignore_ascii_case(mt::JOB_CANCELLATION) {
             match serde_json::from_str::<JobCancelMessage>(body) {
                 Ok(c) => {
@@ -681,65 +732,87 @@ impl Listener {
         .await
     }
 
-    fn spawn_job(&self, r: RunnerJobRequestRef, done_tx: mpsc::Sender<()>) -> RunningJob {
+    fn spawn_job(
+        &self,
+        request_id: String,
+        lease: Lease,
+        waited: Duration,
+        json: String,
+        info: JobInfo,
+        done_tx: mpsc::Sender<u64>,
+    ) -> RunningJob {
         let (control_tx, control_rx) = mpsc::channel(8);
+        let generation = NEXT_JOB.fetch_add(1, Ordering::Relaxed);
         let ctx = JobTask {
             shared: self.shared.clone(),
             identity: self.identity.clone(),
-            tokens: self.tokens.clone(),
             tag: self.tag.clone(),
         };
         let handle = tokio::spawn(async move {
-            ctx.run(r, control_rx).await;
-            let _ = done_tx.send(()).await;
+            ctx.run(lease, waited, json, info, control_rx).await;
+            let _ = done_tx.send(generation).await;
         });
         RunningJob {
+            request_id,
+            generation,
             control: control_tx,
             handle,
         }
     }
+
+    async fn acquire(&self, r: &RunnerJobRequestRef) -> Result<String> {
+        let mut retried = false;
+        loop {
+            let token = self.tokens.get().await?;
+            let result = match r.run_service_url.as_deref().filter(|u| !u.is_empty()) {
+                Some(url) => {
+                    run_service::acquire_job(
+                        &self.shared.http,
+                        url,
+                        &token,
+                        &r.runner_request_id,
+                        r.billing_owner_id.as_deref(),
+                    )
+                    .await
+                }
+                None => {
+                    pipelines::runner_message(
+                        &self.shared.http,
+                        &self.identity.server_url,
+                        &token,
+                        &r.runner_request_id,
+                    )
+                    .await
+                }
+            };
+            match result {
+                Err(e) if !retried && status_of(&e) == Some(401) => {
+                    self.tokens.invalidate().await;
+                    retried = true;
+                }
+                other => return other,
+            }
+        }
+    }
 }
+
+static NEXT_JOB: AtomicU64 = AtomicU64::new(1);
 
 struct JobTask {
     shared: Arc<Shared>,
     identity: Arc<Identity>,
-    tokens: Arc<TokenSource>,
     tag: String,
 }
 
 impl JobTask {
-    async fn run(self, r: RunnerJobRequestRef, mut control: mpsc::Receiver<JobControl>) {
-        let queued = Instant::now();
-        // Wait for a global slot; give up if the job is cancelled meanwhile.
-        let lease = tokio::select! {
-            lease = self.shared.slots.acquire() => lease,
-            ctl = control.recv() => {
-                if ctl.is_some() {
-                    tracing::info!("{}: job cancelled while waiting for a slot", self.tag);
-                }
-                return;
-            }
-        };
-        let waited = queued.elapsed();
-
-        let json = match self.acquire(&r).await {
-            Ok(j) => j,
-            Err(e) => {
-                match run_service::job_gone(&e) {
-                    Some(why) => tracing::info!("{}: job request skipped ({why:?})", self.tag),
-                    None => tracing::error!("{}: cannot acquire job: {e:#}", self.tag),
-                }
-                return;
-            }
-        };
-        let info = match worker::parse_job(&json) {
-            Ok(i) => i,
-            Err(e) => {
-                tracing::error!("{}: unusable job message: {e:#}", self.tag);
-                return;
-            }
-        };
-
+    async fn run(
+        self,
+        lease: Lease,
+        waited: Duration,
+        json: String,
+        info: JobInfo,
+        control: mpsc::Receiver<JobControl>,
+    ) {
         let package = self.shared.package();
         let slot_root = {
             let data_dir = self.shared.data_dir.clone();
@@ -820,40 +893,5 @@ impl JobTask {
             tracing::warn!("slot {}: cleanup failed: {e:#}", lease.index);
         }
         drop(lease);
-    }
-
-    async fn acquire(&self, r: &RunnerJobRequestRef) -> Result<String> {
-        let mut retried = false;
-        loop {
-            let token = self.tokens.get().await?;
-            let result = match r.run_service_url.as_deref().filter(|u| !u.is_empty()) {
-                Some(url) => {
-                    run_service::acquire_job(
-                        &self.shared.http,
-                        url,
-                        &token,
-                        &r.runner_request_id,
-                        r.billing_owner_id.as_deref(),
-                    )
-                    .await
-                }
-                None => {
-                    pipelines::runner_message(
-                        &self.shared.http,
-                        &self.identity.server_url,
-                        &token,
-                        &r.runner_request_id,
-                    )
-                    .await
-                }
-            };
-            match result {
-                Err(e) if !retried && status_of(&e) == Some(401) => {
-                    self.tokens.invalidate().await;
-                    retried = true;
-                }
-                other => return other,
-            }
-        }
     }
 }

@@ -2,13 +2,21 @@
 # labelled `hive-e2e`. Not run automatically.
 name: hive-e2e
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "matrix (3 parallel jobs) or cancel (one long job to cancel)"
+        default: matrix
+        type: choice
+        options: [matrix, cancel]
 
 permissions:
   contents: read
 
 jobs:
   matrix:
+    if: inputs.mode == 'matrix'
     strategy:
       matrix:
         n: [1, 2, 3]
@@ -39,3 +47,16 @@ jobs:
           echo "### hello from runner-hive" >> "$GITHUB_STEP_SUMMARY"
       - shell: bash
         run: test "${{ steps.out.outputs.answer }}" = 42
+
+  cancel:
+    if: inputs.mode == 'cancel'
+    runs-on: [self-hosted, hive-e2e]
+    steps:
+      - name: Wait to be cancelled
+        shell: bash
+        run: |
+          for i in $(seq 1 600); do echo "tick $i"; sleep 1; done
+      - name: Cleanup runs on cancel
+        if: cancelled()
+        shell: bash
+        run: echo "post-cancel cleanup ran"
