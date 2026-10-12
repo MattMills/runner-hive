@@ -102,3 +102,25 @@ pub fn build_client() -> Result<Client> {
         .http2_keep_alive_while_idle(true)
         .build()?)
 }
+
+/// HTTP/2 servers cap concurrent streams per connection (the broker allows
+/// 100) and hyper queues requests beyond the cap instead of opening another
+/// connection, so a long-poll stuck in that queue times out. Listeners are
+/// therefore spread over one client (one connection per host) per this many.
+pub const LISTENERS_PER_CLIENT: usize = 50;
+
+#[derive(Default)]
+pub struct ClientPool {
+    clients: Vec<Client>,
+    assigned: usize,
+}
+
+impl ClientPool {
+    pub fn next(&mut self) -> Result<Client> {
+        if self.assigned.is_multiple_of(LISTENERS_PER_CLIENT) {
+            self.clients.push(build_client()?);
+        }
+        self.assigned += 1;
+        Ok(self.clients.last().expect("pushed above").clone())
+    }
+}

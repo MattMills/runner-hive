@@ -33,6 +33,20 @@ them from one process:
 * **Discovery**: point it at a user or org and it registers every repo you admin,
   picks up new repos, and prunes deleted ones.
 
+### Measured
+
+Idle, on one Windows 11 machine, official runner 2.338.0:
+
+| | handles | working set | private memory | threads | TCP connections |
+|---|---:|---:|---:|---:|---:|
+| **one** official runner (`Runner.Listener`) | 542 | 73 MB | 22 MB | 20 | 1 |
+| runner-hive serving **150** registrations | 300 | 25 MB | 12 MB | 8 | 3 |
+
+150 official runners would be ~81,000 handles and ~11 GB of working set before
+any container overhead. runner-hive used 2.3 s of CPU in its first 5 minutes,
+mostly startup. The broker caps HTTP/2 streams at 100 per connection, so
+listeners are spread at 50 per connection: 150 registrations, 3 sockets.
+
 There is no Rust implementation of the runner protocol that I could find. The Go
 project [github-act-runner](https://github.com/ChristopherHX/github-act-runner)
 also multiplexes registrations, but it executes jobs with

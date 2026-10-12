@@ -25,7 +25,7 @@ use crate::worker::{self, JobControl, JobInfo, JobOutcome, JobRun};
 
 /// State shared by every listener in the hive.
 pub struct Shared {
-    pub http: Client,
+    pub clients: std::sync::Mutex<crate::http::ClientPool>,
     pub package: RwLock<Arc<WorkerPackage>>,
     pub slots: Arc<Slots>,
     pub data_dir: PathBuf,
@@ -125,6 +125,8 @@ struct RunningJob {
 pub struct Listener {
     shared: Arc<Shared>,
     identity: Arc<Identity>,
+    /// This listener's HTTP client; see `hive::ClientPool`.
+    http: Client,
     tokens: Arc<TokenSource>,
     key: rsa::RsaPrivateKey,
     shutdown: watch::Receiver<bool>,
@@ -136,13 +138,15 @@ impl Listener {
         shared: Arc<Shared>,
         identity: Identity,
         shutdown: watch::Receiver<bool>,
+        http: Client,
     ) -> Result<Self> {
         let identity = Arc::new(identity);
-        let tokens = Arc::new(TokenSource::new(shared.http.clone(), identity.clone())?);
+        let tokens = Arc::new(TokenSource::new(http.clone(), identity.clone())?);
         let key = identity.key()?;
         let tag = identity.display_key();
         Ok(Self {
             shared,
+            http,
             identity,
             tokens,
             key,
@@ -374,13 +378,9 @@ impl Listener {
         let token = self.tokens.get().await?;
         if let Some(url) = self.broker_flow() {
             let url = crate::util::with_trailing_slash(&url);
-            let resp = broker::create_session(
-                &self.shared.http,
-                &url,
-                &token,
-                &self.session_request(true),
-            )
-            .await?;
+            let resp =
+                broker::create_session(&self.http, &url, &token, &self.session_request(true))
+                    .await?;
             return Ok(Session {
                 id: resp.session_id,
                 mode: Mode::Broker { url },
@@ -389,7 +389,7 @@ impl Listener {
             });
         }
         let resp = pipelines::create_session(
-            &self.shared.http,
+            &self.http,
             &self.identity.server_url,
             &token,
             self.identity.pool_id,
@@ -432,7 +432,7 @@ impl Listener {
         let r = match self.broker_flow() {
             Some(url) => {
                 broker::delete_session(
-                    &self.shared.http,
+                    &self.http,
                     &crate::util::with_trailing_slash(&url),
                     &token,
                     &old,
@@ -441,7 +441,7 @@ impl Listener {
             }
             None => {
                 pipelines::delete_session(
-                    &self.shared.http,
+                    &self.http,
                     &self.identity.server_url,
                     &token,
                     self.identity.pool_id,
@@ -462,11 +462,11 @@ impl Listener {
         };
         let r = match &session.mode {
             Mode::Broker { url } => {
-                broker::delete_session(&self.shared.http, url, &token, &session.id).await
+                broker::delete_session(&self.http, url, &token, &session.id).await
             }
             Mode::Pipelines { .. } => {
                 pipelines::delete_session(
-                    &self.shared.http,
+                    &self.http,
                     &self.identity.server_url,
                     &token,
                     self.identity.pool_id,
@@ -496,7 +496,7 @@ impl Listener {
     async fn poll_once(&self, session: &Session, status: &str) -> Result<Option<Polled>> {
         let token = self.tokens.get().await?;
         let version = self.shared.runner_version();
-        let http = &self.shared.http;
+        let http = &self.http;
         match &session.mode {
             Mode::Broker { url } => {
                 let m = broker::get_message(http, url, &token, &session.id, status, &version, true)
@@ -570,7 +570,7 @@ impl Listener {
             return;
         };
         if let Err(e) = pipelines::delete_message(
-            &self.shared.http,
+            &self.http,
             &self.identity.server_url,
             &token,
             self.identity.pool_id,
@@ -721,7 +721,7 @@ impl Listener {
     ) -> Result<()> {
         let token = self.tokens.get().await?;
         broker::acknowledge(
-            &self.shared.http,
+            &self.http,
             broker_url,
             &token,
             session_id,
@@ -744,6 +744,7 @@ impl Listener {
         let (control_tx, control_rx) = mpsc::channel(8);
         let generation = NEXT_JOB.fetch_add(1, Ordering::Relaxed);
         let ctx = JobTask {
+            http: self.http.clone(),
             shared: self.shared.clone(),
             identity: self.identity.clone(),
             tag: self.tag.clone(),
@@ -767,7 +768,7 @@ impl Listener {
             let result = match r.run_service_url.as_deref().filter(|u| !u.is_empty()) {
                 Some(url) => {
                     run_service::acquire_job(
-                        &self.shared.http,
+                        &self.http,
                         url,
                         &token,
                         &r.runner_request_id,
@@ -777,7 +778,7 @@ impl Listener {
                 }
                 None => {
                     pipelines::runner_message(
-                        &self.shared.http,
+                        &self.http,
                         &self.identity.server_url,
                         &token,
                         &r.runner_request_id,
@@ -799,6 +800,7 @@ impl Listener {
 static NEXT_JOB: AtomicU64 = AtomicU64::new(1);
 
 struct JobTask {
+    http: Client,
     shared: Arc<Shared>,
     identity: Arc<Identity>,
     tag: String,
@@ -848,7 +850,7 @@ impl JobTask {
         let started = Instant::now();
         let outcome = worker::run_job(
             JobRun {
-                http: &self.shared.http,
+                http: &self.http,
                 identity: &self.identity,
                 slot_root: &slot_root,
                 job_json: &json,

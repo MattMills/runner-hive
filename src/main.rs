@@ -182,6 +182,11 @@ async fn status(cfg: &Config, remote: bool) -> Result<()> {
     } else {
         None
     };
+    // One runner listing per scope, however many registrations it has.
+    let mut listings: std::collections::HashMap<
+        identity::Scope,
+        Result<Vec<github::RunnerInfo>, String>,
+    > = std::collections::HashMap::new();
     for id in &ids {
         let mut line = format!(
             "{:<50} {:<24} id={:<8} labels={}",
@@ -191,13 +196,20 @@ async fn status(cfg: &Config, remote: bool) -> Result<()> {
             id.labels.join(",")
         );
         if let Some(gh) = &gh {
-            let state = match gh.list_runners(&id.scope).await {
+            if !listings.contains_key(&id.scope) {
+                let listing = gh
+                    .list_runners(&id.scope)
+                    .await
+                    .map_err(|e| format!("{e:#}"));
+                listings.insert(id.scope.clone(), listing);
+            }
+            let state = match &listings[&id.scope] {
                 Ok(rs) => match rs.iter().find(|r| r.id == id.agent_id) {
                     Some(r) if r.busy => format!("{} (busy)", r.status),
                     Some(r) => r.status.clone(),
                     None => "MISSING on GitHub".into(),
                 },
-                Err(e) => format!("error: {e:#}"),
+                Err(e) => format!("error: {e}"),
             };
             line.push_str(&format!("  {state}"));
         }

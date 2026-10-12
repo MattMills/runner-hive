@@ -44,7 +44,7 @@ pub async fn run(cfg: Config, initial_sync: bool) -> Result<()> {
     let mut env_remove = cfg.secret_env_vars();
     env_remove.push("RUST_LOG".into());
     let shared = Arc::new(Shared {
-        http: http.clone(),
+        clients: Default::default(),
         package: RwLock::new(Arc::new(pkg)),
         slots: Slots::new(cfg.max_jobs),
         data_dir: cfg.data_dir.clone(),
@@ -142,7 +142,14 @@ fn start(
         return;
     }
     let (tx, rx) = watch::channel(false);
-    match Listener::new(shared.clone(), id, rx) {
+    let http = match shared.clients.lock().expect("client pool poisoned").next() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("{key}: cannot create an HTTP client: {e:#}");
+            return;
+        }
+    };
+    match Listener::new(shared.clone(), id, rx, http) {
         Ok(listener) => {
             let k = key.clone();
             tasks.spawn(async move {
