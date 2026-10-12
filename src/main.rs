@@ -12,6 +12,7 @@ mod protocol;
 mod register;
 mod slots;
 mod sync;
+mod user;
 mod util;
 mod worker;
 
@@ -156,7 +157,8 @@ async fn async_main(cli: Cli) -> Result<()> {
         Command::SelfTest => {
             let gh = github_client(&cfg)?;
             let pkg = worker::package::ensure(&cfg, &gh).await?;
-            worker::self_test(&cfg.data_dir, &pkg).await?;
+            let run_as = resolve_run_as(&cfg)?;
+            worker::self_test(&cfg.data_dir, &pkg, run_as.as_ref()).await?;
             println!(
                 "ok: Runner.Worker {} received and parsed a job message over the pipe",
                 pkg.version
@@ -217,4 +219,15 @@ async fn status(cfg: &Config, remote: bool) -> Result<()> {
     }
     println!("{} registrations", ids.len());
     Ok(())
+}
+
+/// Resolve `worker.run_as`, which only works when the daemon runs as root.
+pub fn resolve_run_as(cfg: &Config) -> Result<Option<user::RunAs>> {
+    let Some(name) = cfg.worker.run_as.as_deref() else {
+        return Ok(None);
+    };
+    if !user::is_root() {
+        bail!("worker.run_as = \"{name}\" needs runner-hive to run as root");
+    }
+    Ok(Some(user::lookup(name)?))
 }

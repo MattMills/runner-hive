@@ -61,6 +61,8 @@ pub struct SpawnOptions<'a> {
     pub env_remove: &'a [String],
     pub log_output: bool,
     pub log_prefix: String,
+    /// Start the worker as this user (Unix; the daemon must be root).
+    pub run_as: Option<&'a crate::user::RunAs>,
 }
 
 const TAIL_LINES: usize = 60;
@@ -79,6 +81,15 @@ impl WorkerProcess {
             .kill_on_drop(true);
         for k in opts.env_remove {
             cmd.env_remove(k);
+        }
+        if let Some(who) = opts.run_as {
+            #[cfg(unix)]
+            {
+                cmd.uid(who.uid).gid(who.gid);
+            }
+            cmd.env("HOME", &who.home)
+                .env("USER", &who.name)
+                .env("LOGNAME", &who.name);
         }
         for (k, v) in opts.env_set {
             cmd.env(k, v);

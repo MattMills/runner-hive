@@ -112,7 +112,11 @@ fn link_tree(src: &Path, dst: &Path) -> Result<usize> {
 /// Write the per-job `.runner` and `.credentials` that the worker reads. The
 /// credentials file carries only the client id (used for display); the
 /// private key never enters a slot, where job steps could read it.
-pub fn write_runner_config(root: &Path, id: &Identity) -> Result<()> {
+pub fn write_runner_config(
+    root: &Path,
+    id: &Identity,
+    run_as: Option<&crate::user::RunAs>,
+) -> Result<()> {
     let mut runner = json!({
         "agentId": id.agent_id,
         "agentName": id.name,
@@ -142,8 +146,23 @@ pub fn write_runner_config(root: &Path, id: &Identity) -> Result<()> {
         root.join(".credentials"),
         serde_json::to_vec_pretty(&creds)?,
     )?;
-    std::fs::create_dir_all(root.join("_work"))?;
+    // The worker writes only to _work and _diag. With run_as, those two belong
+    // to the job user while the slot root, bin/ and the config stay owned by
+    // the daemon, so a job cannot swap the worker binary for the next job.
+    for dir in ["_work", "_diag"] {
+        let p = root.join(dir);
+        std::fs::create_dir_all(&p)?;
+        if let Some(who) = run_as {
+            crate::user::give(&p, who)?;
+        }
+    }
     Ok(())
+}
+
+/// Whether slot `index` already holds a checkout of `repo` (its `_work/<repo>`),
+/// so jobs can return to warm caches such as incremental `target/` dirs.
+pub fn has_repo(data_dir: &Path, index: usize, repo: &str) -> bool {
+    !repo.is_empty() && slot_root(data_dir, index).join("_work").join(repo).is_dir()
 }
 
 /// Remove checkouts left in `_work`, keeping the tool and action caches.

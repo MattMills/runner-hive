@@ -100,6 +100,10 @@ pub struct WorkerConfig {
     /// Delete a repo's checkout under `_work` after each job.
     #[serde(default)]
     pub clean_workspace: bool,
+    /// Run jobs as this user while the daemon (root) keeps the admin token and
+    /// runner keys out of their reach. Unix only.
+    #[serde(default)]
+    pub run_as: Option<String>,
 }
 
 impl Default for WorkerConfig {
@@ -109,6 +113,7 @@ impl Default for WorkerConfig {
             path: None,
             log_output: false,
             clean_workspace: false,
+            run_as: None,
         }
     }
 }
@@ -305,6 +310,7 @@ version = "latest"         # official actions/runner release used to run jobs
 # path = "/opt/actions-runner"  # or use an existing extracted runner
 log_output = false
 clean_workspace = false
+# run_as = "runner"        # Unix: daemon runs as root, jobs as this user
 
 # Every repo you own. Self-hosted runners on PUBLIC repos can run code from
 # fork pull requests; only opt in if you understand that.

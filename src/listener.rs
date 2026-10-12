@@ -33,6 +33,7 @@ pub struct Shared {
     pub env_remove: Vec<String>,
     pub log_output: bool,
     pub clean_workspace: bool,
+    pub run_as: Option<crate::user::RunAs>,
 }
 
 impl Shared {
@@ -623,8 +624,8 @@ impl Listener {
             // again: until a request is acquired the broker re-delivers it on
             // every poll (the official listener also acquires inline).
             let queued = Instant::now();
-            let lease = tokio::select! {
-                lease = self.shared.slots.acquire() => lease,
+            let permit = tokio::select! {
+                permit = self.shared.slots.acquire() => permit,
                 _ = stop_rx.changed() => return,
             };
             let waited = queued.elapsed();
@@ -659,6 +660,15 @@ impl Listener {
                     .send(JobControl::Cancel(Duration::from_secs(60)))
                     .await;
             }
+            // Prefer a slot that already has this repo checked out (warm caches).
+            let repo_dir = info
+                .repository
+                .as_deref()
+                .and_then(|r| r.rsplit('/').next())
+                .unwrap_or("")
+                .to_string();
+            let data_dir = self.shared.data_dir.clone();
+            let lease = permit.assign(|i| worker::slot::has_repo(&data_dir, i, &repo_dir));
             *job = Some(self.spawn_job(
                 r.runner_request_id,
                 lease,
@@ -858,6 +868,7 @@ impl JobTask {
                 env_set: &self.shared.env_set,
                 env_remove: &self.shared.env_remove,
                 log_output: self.shared.log_output,
+                run_as: self.shared.run_as.as_ref(),
             },
             control,
         )

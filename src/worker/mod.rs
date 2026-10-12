@@ -115,6 +115,7 @@ pub struct JobRun<'a> {
     pub env_set: &'a [(String, String)],
     pub env_remove: &'a [String],
     pub log_output: bool,
+    pub run_as: Option<&'a crate::user::RunAs>,
 }
 
 pub async fn run_job(
@@ -153,7 +154,7 @@ pub async fn run_job(
         ));
     }
 
-    slot::write_runner_config(run.slot_root, run.identity)?;
+    slot::write_runner_config(run.slot_root, run.identity, run.run_as)?;
     let exe = run.slot_root.join("bin").join(package::worker_exe_name());
     let prefix = format!("[{} {}]", run.identity.scope, info.display_name);
     let mut worker = WorkerProcess::spawn(SpawnOptions {
@@ -162,6 +163,7 @@ pub async fn run_job(
         env_remove: run.env_remove,
         log_output: run.log_output,
         log_prefix: prefix,
+        run_as: run.run_as,
     })?;
 
     if let Err(e) = worker.send(MessageType::NewJobRequest, run.job_json).await {
@@ -263,10 +265,21 @@ pub async fn run_job(
 /// valid JSON but has no `resources`. A worker that received and parsed our
 /// message fails with a complaint about `Resources`; any other failure means
 /// the pipe handoff or framing is wrong on this platform.
-pub async fn self_test(data_dir: &Path, pkg: &package::WorkerPackage) -> Result<()> {
+pub async fn self_test(
+    data_dir: &Path,
+    pkg: &package::WorkerPackage,
+    run_as: Option<&crate::user::RunAs>,
+) -> Result<()> {
     let pkg = pkg.clone();
     let root_dir = data_dir.join("slots").join("self-test");
     let root = tokio::task::spawn_blocking(move || slot::prepare_at(root_dir, &pkg)).await??;
+    for dir in ["_work", "_diag"] {
+        let p = root.join(dir);
+        std::fs::create_dir_all(&p)?;
+        if let Some(who) = run_as {
+            crate::user::give(&p, who)?;
+        }
+    }
     let exe = root.join("bin").join(package::worker_exe_name());
     let mut worker = WorkerProcess::spawn(SpawnOptions {
         exe: &exe,
@@ -274,6 +287,7 @@ pub async fn self_test(data_dir: &Path, pkg: &package::WorkerPackage) -> Result<
         env_remove: &[],
         log_output: false,
         log_prefix: String::new(),
+        run_as,
     })?;
     worker
         .send(

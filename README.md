@@ -96,6 +96,7 @@ jobs:
 | `worker.version` | `latest` | official runner release used to run jobs |
 | `worker.path` | — | use an existing extracted `actions-runner` directory instead |
 | `worker.clean_workspace` | false | delete checkouts after each job (keeps tool/action caches) |
+| `worker.run_as` | — | Unix: daemon runs as root, jobs as this user (see Security) |
 | `[env]` | — | extra environment for every job (the runner's `.env`) |
 
 Targets:
@@ -156,16 +157,19 @@ The runner protocol isn't documented, so this was reverse engineered from the
 `Runner.Worker` finds its root directory from its own path and reads `.runner`
 there, so each concurrent job needs its own root. A **slot** is a hardlinked copy
 of the runner package (near-zero disk) with that job's `.runner`. There are
-`max_jobs` slots, not one per repo.
+`max_jobs` slots, not one per repo. A job goes to a free slot that already has
+its repo checked out when there is one, so incremental build caches stay warm.
 
 ## Security
 
 * **Self-hosted runners on public repositories can run code from fork pull
   requests.** Owner targets skip public repos unless `include_public = true`.
-* All registrations share one machine and one OS user. A job from repo A can read
-  files belonging to repo B's checkouts, and the hive's `data_dir` holds every
-  registration's private key. That is the same trust model as running many
-  official runners side by side under one user. Use it for repos you trust
+* Set `worker.run_as = "runner"` (Unix) and run the daemon as root: jobs then
+  run as that user and cannot read the daemon's environment (the admin token),
+  `data_dir/runners` (every registration's private key), or the slot's `bin/`.
+  Without it, jobs run as the daemon's user and can read all of those.
+* Jobs from different repos still share one job user, so a job can read other
+  repos' checkouts or leave processes behind. Use one hive for repos you trust
   equally (e.g. all your own), or run separate hives per trust boundary.
 * The admin token is stripped from job environments, and runner private keys are
   never written into job slots.
@@ -202,8 +206,7 @@ and running jobs on a Linux host (Linux is covered only by the IPC self-test).
 
 **Not implemented**: the server-driven `RunnerRefreshConfig` migration (logged
 and ignored; the existing registration keeps working), legacy
-`PipelineAgentJobRequest` messages (old GHES), and running jobs as a different
-OS user.
+`PipelineAgentJobRequest` messages (old GHES), and a container per job.
 
 ## License
 
