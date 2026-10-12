@@ -57,6 +57,7 @@ pub async fn run(cfg: Config, initial_sync: bool) -> Result<()> {
         log_output: cfg.worker.log_output,
         clean_workspace: cfg.worker.clean_workspace,
         run_as: crate::resolve_run_as(&cfg)?,
+        slot_home: cfg.worker.slot_home,
     });
 
     let mut tasks: JoinSet<(String, ListenerExit)> = JoinSet::new();

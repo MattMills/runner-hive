@@ -104,6 +104,10 @@ pub struct WorkerConfig {
     /// runner keys out of their reach. Unix only.
     #[serde(default)]
     pub run_as: Option<String>,
+    /// Give each slot its own HOME (`<slot>/home`). Set CARGO_HOME /
+    /// RUSTUP_HOME in [env] if toolchains live in the job user's real home.
+    #[serde(default)]
+    pub slot_home: bool,
 }
 
 impl Default for WorkerConfig {
@@ -114,6 +118,7 @@ impl Default for WorkerConfig {
             log_output: false,
             clean_workspace: false,
             run_as: None,
+            slot_home: false,
         }
     }
 }

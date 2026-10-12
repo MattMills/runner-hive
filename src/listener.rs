@@ -34,6 +34,7 @@ pub struct Shared {
     pub log_output: bool,
     pub clean_workspace: bool,
     pub run_as: Option<crate::user::RunAs>,
+    pub slot_home: bool,
 }
 
 impl Shared {
@@ -857,6 +858,23 @@ impl JobTask {
             self.shared.slots.running(),
             self.shared.slots.total()
         );
+        let mut env = self.shared.env_set.clone();
+        if self.shared.slot_home {
+            // One job at a time per slot, so a per-slot HOME keeps one job's
+            // `git config --global` (or a hook that clears it) away from another.
+            let home = slot_root.join("home");
+            let prepared = std::fs::create_dir_all(&home)
+                .map_err(anyhow::Error::from)
+                .and_then(|_| match self.shared.run_as.as_ref() {
+                    Some(who) => crate::user::give(&home, who),
+                    None => Ok(()),
+                });
+            if let Err(e) = prepared {
+                tracing::error!("slot {}: cannot prepare HOME: {e:#}", lease.index);
+                return;
+            }
+            env.push(("HOME".into(), home.to_string_lossy().into_owned()));
+        }
         let started = Instant::now();
         let outcome = worker::run_job(
             JobRun {
@@ -865,7 +883,7 @@ impl JobTask {
                 slot_root: &slot_root,
                 job_json: &json,
                 info: &info,
-                env_set: &self.shared.env_set,
+                env_set: &env,
                 env_remove: &self.shared.env_remove,
                 log_output: self.shared.log_output,
                 run_as: self.shared.run_as.as_ref(),
