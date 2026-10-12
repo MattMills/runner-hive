@@ -1,0 +1,4 @@
+/target
+/.e2e/
+hive-data/
+hive.toml

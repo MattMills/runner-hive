@@ -1,0 +1,44 @@
+[package]
+name = "runner-hive"
+version = "0.1.0"
+description = "One small daemon that serves GitHub Actions jobs for hundreds of repositories"
+license = "MIT"
+repository = "https://github.com/MattMills/runner-hive"
+edition = "2024"
+
+[dependencies]
+aes = "0.9.3"
+anyhow = "1.0.104"
+base64 = "0.23.1"
+cbc = { version = "0.2.1", features = ["block-padding", "alloc"] }
+clap = { version = "4.6.7", features = ["derive", "env"] }
+flate2 = "1.1.10"
+futures-util = "0.3.34"
+globset = "0.4.20"
+hostname = "0.4.2"
+rand = "0.8"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "http2", "stream"] }
+rsa = { version = "0.9.10", features = ["sha2"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha1 = "0.10"
+sha2 = "0.10"
+tar = "0.4.46"
+tokio = { version = "1.53.2", features = ["full"] }
+toml = "1.1.8"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+url = "2.5.8"
+uuid = { version = "1.28.0", features = ["v4", "serde"] }
+zip = "9.0.2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Pipes", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

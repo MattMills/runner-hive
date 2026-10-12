@@ -1,0 +1,41 @@
+# Manually triggered end-to-end check against a live runner-hive registration
+# labelled `hive-e2e`. Not run automatically.
+name: hive-e2e
+
+on: workflow_dispatch
+
+permissions:
+  contents: read
+
+jobs:
+  matrix:
+    strategy:
+      matrix:
+        n: [1, 2, 3]
+    runs-on: [self-hosted, hive-e2e]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Hello
+        shell: bash
+        run: echo "job ${{ matrix.n }} on $RUNNER_NAME ($RUNNER_OS/$RUNNER_ARCH) in $GITHUB_WORKSPACE"
+      - name: Admin token must not reach jobs
+        shell: bash
+        run: |
+          if [ -n "${GITHUB_TOKEN:-}${GH_TOKEN:-}${RUNNER_HIVE_TOKEN:-}" ]; then
+            echo "admin token leaked into the job environment"; exit 1
+          fi
+      - name: Runner private key must not be in the slot
+        shell: bash
+        run: |
+          root="$(cd "$RUNNER_WORKSPACE/../.." && pwd)"
+          ls -la "$root"
+          if ls "$root"/.credentials_rsaparams 2>/dev/null; then exit 1; fi
+          cat "$root/.runner"
+      - name: Job outputs and step summaries work
+        id: out
+        shell: bash
+        run: |
+          echo "answer=42" >> "$GITHUB_OUTPUT"
+          echo "### hello from runner-hive" >> "$GITHUB_STEP_SUMMARY"
+      - shell: bash
+        run: test "${{ steps.out.outputs.answer }}" = 42
