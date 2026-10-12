@@ -39,6 +39,19 @@ jobs:
           ls -la "$root"
           if ls "$root"/.credentials_rsaparams 2>/dev/null; then exit 1; fi
           cat "$root/.runner"
+      - name: Job cannot escalate or read the daemon (Linux, worker.run_as)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          id
+          if sudo -n true 2>/dev/null; then echo "job has passwordless sudo"; exit 1; fi
+          for p in /proc/[0-9]*; do
+            if grep -qa RUNNER_HIVE_TOKEN "$p/environ" 2>/dev/null; then
+              echo "admin token readable via $p/environ"; exit 1
+            fi
+          done
+          echo "HOME=$HOME CARGO_HOME=${CARGO_HOME:-} RUSTUP_HOME=${RUSTUP_HOME:-}"
+          command -v cargo && cargo --version
       - name: Job outputs and step summaries work
         id: out
         shell: bash
