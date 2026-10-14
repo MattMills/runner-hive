@@ -1,0 +1,84 @@
+# Toolchains for cross-compiling Windows x64 binaries on Linux runners, added to a runner-hive
+# image (BASE: contrib/Dockerfile's output; it needs curl, unzip and xz, as the hippo image's
+# runner base has). The daemon and everything else in BASE stay as they are:
+#
+#   docker build -f contrib/Dockerfile --build-arg BASE=ghr-runner:latest -t runner-hive:base .
+#   docker build -f contrib/Dockerfile.windows-cross --build-arg BASE=runner-hive:base -t runner-hive contrib
+#
+# Adds, at fixed paths and outside the PATH (so nothing a job already runs changes), except ninja:
+#   /opt/llvm-mingw   llvm-mingw: LLVM (clang, lld, llvm-lib, llvm-rc, llvm-ar, ...), with the
+#                     MinGW-w64 headers and CRT for *-w64-mingw32 and Rust's *-pc-windows-gnullvm,
+#                     plus a clang-cl link (clang's MSVC-style driver)
+#   /opt/xwin         the Microsoft CRT and Windows SDK (headers and import libraries) for
+#                     x86_64-pc-windows-msvc with clang-cl and lld-link, splatted by xwin.
+#                     Microsoft's license terms apply: https://go.microsoft.com/fwlink/?LinkId=2086102
+#   /usr/local/bin/ninja
+#   the Rust targets x86_64-pc-windows-msvc and x86_64-pc-windows-gnullvm in the runner user's
+#                     rustup, when BASE has one. A container whose /home/runner is a volume keeps
+#                     the volume's rustup: add them there once with
+#                     docker exec -u runner <container> rustup target add x86_64-pc-windows-msvc x86_64-pc-windows-gnullvm
+#
+# Every download is pinned by version and SHA-256. The VS channel manifest pins the CRT and SDK
+# packages (xwin checks each against it), and the splat's own hash is checked as well.
+ARG BASE=runner-hive:latest
+
+FROM ${BASE} AS fetch
+USER root
+WORKDIR /fetch
+ARG LLVM_MINGW_VERSION=20260922
+ARG LLVM_MINGW_SHA256=bb7bb7654b33d5aa8712acb837c963b2e0c56352560c76105270a3268c665c21
+ARG NINJA_VERSION=1.13.2
+ARG NINJA_SHA256=5749cbc4e668273514150a80e387a957f933c6ed3f5f11e03fb30955e2bbead6
+ARG XWIN_VERSION=0.10.0
+ARG XWIN_SHA256=d870eb4b2f390878af6da1ccd3cf321d22fcb72720984853b4be732ae597fc88
+# Visual Studio 2022 17.14.42's channel manifest (where https://aka.ms/vs/17/release/channel
+# pointed on 2026-10-14), and the CRT and SDK versions in it
+ARG VS_CHANNEL_URL=https://download.visualstudio.microsoft.com/download/pr/c95450be-0a45-4779-b142-33f567ccfd6e/f24aa010ba2fd5079d502e47bf40f5932f097df4bd716234dc68175b39649401/VisualStudio.17.Release.chman
+ARG VS_CHANNEL_SHA256=4f0f290bb4d58a061a49a2fa893357a8c9e7e2b49fc91873f533ab8f791e4fa0
+ARG MSVC_CRT_VERSION=14.44.17.14
+ARG WINDOWS_SDK_VERSION=10.0.26100
+# over the splat: its files' hashes and its symlinks, sorted (computed below)
+ARG XWIN_SPLAT_SHA256=1e8f801ad510ec0d466915c3895101d19bc0557f6992d6744ddbc9d8d9b3a384
+
+RUN set -eux; \
+    llvm_mingw="llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-22.04-x86_64"; \
+    curl -fsSL -o llvm-mingw.tar.xz \
+        "https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/${llvm_mingw}.tar.xz"; \
+    echo "${LLVM_MINGW_SHA256}  llvm-mingw.tar.xz" | sha256sum -c -; \
+    tar -xJf llvm-mingw.tar.xz --no-same-owner; \
+    mv "${llvm_mingw}" /opt/llvm-mingw; \
+    ln -s clang /opt/llvm-mingw/bin/clang-cl
+
+RUN set -eux; \
+    curl -fsSL -o ninja.zip \
+        "https://github.com/ninja-build/ninja/releases/download/v${NINJA_VERSION}/ninja-linux.zip"; \
+    echo "${NINJA_SHA256}  ninja.zip" | sha256sum -c -; \
+    unzip -q ninja.zip -d /opt/ninja
+
+RUN set -eux; \
+    xwin="xwin-${XWIN_VERSION}-x86_64-unknown-linux-musl"; \
+    curl -fsSL -o xwin.tar.gz \
+        "https://github.com/Jake-Shadle/xwin/releases/download/${XWIN_VERSION}/${xwin}.tar.gz"; \
+    echo "${XWIN_SHA256}  xwin.tar.gz" | sha256sum -c -; \
+    tar -xzf xwin.tar.gz --no-same-owner; \
+    curl -fsSL -o channel.chman "${VS_CHANNEL_URL}"; \
+    echo "${VS_CHANNEL_SHA256}  channel.chman" | sha256sum -c -; \
+    "./${xwin}/xwin" --accept-license --log-level warn --http-retry 3 --cache-dir /fetch/xwin-cache \
+        --manifest channel.chman --crt-version "${MSVC_CRT_VERSION}" --sdk-version "${WINDOWS_SDK_VERSION}" \
+        splat --output /opt/xwin; \
+    cd /opt/xwin; \
+    actual="$( (find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum; \
+                find . -type l -printf '%p -> %l\n' | LC_ALL=C sort) | sha256sum | cut -d' ' -f1)"; \
+    [ "$actual" = "${XWIN_SPLAT_SHA256}" ] || { echo "xwin splat: sha256 $actual, expected ${XWIN_SPLAT_SHA256}"; exit 1; }
+
+FROM ${BASE}
+USER root
+COPY --from=fetch /opt/llvm-mingw /opt/llvm-mingw
+COPY --from=fetch /opt/xwin /opt/xwin
+COPY --from=fetch /opt/ninja/ninja /usr/local/bin/ninja
+USER runner
+RUN if command -v rustup >/dev/null; then \
+        rustup target add x86_64-pc-windows-msvc x86_64-pc-windows-gnullvm; \
+    fi
+# runner-hive's daemon runs as root (it starts the jobs as worker.run_as)
+USER root
